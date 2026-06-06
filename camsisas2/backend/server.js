@@ -27,6 +27,7 @@ const cors = require('cors');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -46,8 +47,99 @@ if (!VEOPAG_CLIENT_ID || !VEOPAG_CLIENT_SECRET) {
   console.warn('\n⚠️  VEOPAG_CLIENT_ID / VEOPAG_CLIENT_SECRET não definidos. Configure o .env.\n');
 }
 
-app.use(cors({ origin: ALLOWED_ORIGIN }));
+const _origins = ALLOWED_ORIGIN === '*' ? '*' : ALLOWED_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({ origin: _origins }));
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+
+/* ============================================================
+ *  E-MAIL (SMTP) — confirmação de pagamento para o cliente
+ *  Configure no .env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS.
+ *  Gmail: use uma "senha de app" (não a senha normal).
+ *  Hostinger: host smtp.hostinger.com, porta 465.
+ * ============================================================ */
+const SMTP_HOST = env.SMTP_HOST || '';
+const SMTP_PORT = parseInt(env.SMTP_PORT || '465', 10);
+const SMTP_USER = env.SMTP_USER || '';
+const SMTP_PASS = env.SMTP_PASS || '';
+const SMTP_FROM = env.SMTP_FROM || (SMTP_USER ? `Arena do Hexa <${SMTP_USER}>` : '');
+const LOJA_NOME = env.LOJA_NOME || 'Arena do Hexa';
+
+let mailer = null;
+if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // 465 = SSL; 587 = STARTTLS
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+  console.log('✉️  SMTP configurado:', SMTP_HOST);
+} else {
+  console.warn('✉️  SMTP não configurado — e-mails de confirmação desativados (defina SMTP_* no .env).');
+}
+
+async function enviarEmailConfirmacao(pedido) {
+  if (!mailer || !pedido || !pedido.email) return;
+  const valor = (pedido.amount != null ? pedido.amount : 0).toFixed(2).replace('.', ',');
+  const nome = (pedido.nome || 'torcedor(a)').split(' ')[0];
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: pedido.email,
+      subject: `✅ Pagamento confirmado — ${LOJA_NOME}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
+          <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
+            <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
+            <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
+          </div>
+          <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
+            <h2 style="margin:0 0 8px">Pagamento confirmado! 🎉</h2>
+            <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Recebemos o seu pagamento e seu pedido já entrou em separação.</p>
+            <table style="width:100%;border-collapse:collapse;font-size:14px">
+              <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
+              <tr><td style="padding:8px 0;color:#5C6660">Valor pago</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
+            </table>
+            <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Em breve você receberá o código de rastreio. Obrigado por torcer com a gente! 🇧🇷</p>
+          </div>
+        </div>`,
+    });
+    console.log('✉️  E-mail de confirmação enviado para', pedido.email);
+  } catch (e) {
+    console.error('Falha ao enviar e-mail:', e.message);
+  }
+}
+
+async function enviarEmailPedidoRecebido(pedido) {
+  if (!mailer || !pedido || !pedido.email) return;
+  const valor = (pedido.amount != null ? pedido.amount : 0).toFixed(2).replace('.', ',');
+  const nome = (pedido.nome || 'torcedor(a)').split(' ')[0];
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: pedido.email,
+      subject: `🛍️ Recebemos seu pedido — ${LOJA_NOME}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
+          <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
+            <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
+            <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
+          </div>
+          <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
+            <h2 style="margin:0 0 8px">Recebemos seu pedido! 👟</h2>
+            <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Seu pedido foi registrado e estamos <b>aguardando a confirmação do pagamento via PIX</b>. Assim que o pagamento cair, você recebe outro e-mail de confirmação.</p>
+            <table style="width:100%;border-collapse:collapse;font-size:14px">
+              <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
+              <tr><td style="padding:8px 0;color:#5C6660">Valor</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
+            </table>
+            <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Se ainda não pagou, é só abrir o PIX e finalizar. O código expira conforme o tempo do QR Code. 🇧🇷</p>
+          </div>
+        </div>`,
+    });
+    console.log('✉️  E-mail de pedido recebido enviado para', pedido.email);
+  } catch (e) {
+    console.error('Falha ao enviar e-mail (pedido recebido):', e.message);
+  }
+}
 
 /* ============================================================
  *  TABELA DE PREÇOS (fonte da verdade — fica no servidor!)
@@ -176,9 +268,13 @@ app.post('/api/criar-pix', async (req, res) => {
       status: 'pending',
       transaction_id: transactionId,
       amount: (q.amount != null ? q.amount : valor),
+      email: (payer && payer.email) ? payer.email : null,
+      nome: (payer && payer.name) ? payer.name : null,
+      orderId,
       criado_em: Date.now(),
     };
     salvar();
+    enviarEmailPedidoRecebido(pedidos[orderId]); // avisa o cliente: pedido recebido (fire-and-forget)
 
     return res.json({
       qrcode,
@@ -231,7 +327,8 @@ app.post('/api/webhook', (req, res) => {
       pedido.pago_em = Date.now();
       salvar();
       console.log(`✅ Pagamento confirmado: ${orderId}`);
-      // TODO: disparar e-mail/WhatsApp, dar baixa no estoque, etc.
+      enviarEmailConfirmacao(pedido); // notifica o cliente por e-mail (fire-and-forget)
+      // TODO: dar baixa no estoque, etc.
     } else {
       console.log('Webhook recebido sem pedido correspondente:', orderId);
     }
