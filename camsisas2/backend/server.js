@@ -347,6 +347,29 @@ app.get('/api/status/:external_id', (req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, servico: 'arena-do-hexa-pix', provedor: 'veopag', smtp: !!mailer, smtp_host: mailer ? SMTP_HOST : null, email_from: mailer ? SMTP_FROM : null }));
 
+/* Diagnóstico de e-mail: verifica login SMTP e tenta enviar um teste
+   só para o próprio SMTP_USER. Retorna o erro exato se falhar. */
+app.get('/api/test-email', async (_req, res) => {
+  if (!mailer) return res.json({ ok: false, etapa: 'config', erro: 'SMTP não configurado (faltam variáveis SMTP_*).' });
+  const resultado = { host: SMTP_HOST, port: SMTP_PORT, user: SMTP_USER, secure: SMTP_PORT === 465 };
+  try {
+    await mailer.verify();
+    resultado.login = 'OK';
+  } catch (e) {
+    return res.json({ ok: false, etapa: 'login', erro: String(e && e.message || e), code: e && e.code, command: e && e.command, ...resultado });
+  }
+  try {
+    const info = await mailer.sendMail({
+      from: SMTP_FROM, to: SMTP_USER,
+      subject: '✅ Teste de e-mail — Arena do Hexa',
+      text: 'Se você recebeu este e-mail, o envio automático está funcionando!',
+    });
+    return res.json({ ok: true, login: 'OK', enviado: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, ...resultado });
+  } catch (e) {
+    return res.json({ ok: false, etapa: 'envio', login: 'OK', erro: String(e && e.message || e), code: e && e.code, command: e && e.command, ...resultado });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🟢 Backend Arena do Hexa (VeoPag) na porta ${PORT}`);
   console.log(`   Base VeoPag: ${VEOPAG_BASE_URL}`);
