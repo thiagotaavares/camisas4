@@ -1,4 +1,3 @@
-
 /**
  * ============================================================
  *  ARENA DO HEXA — Backend de pagamento PIX (VeoPag)
@@ -346,7 +345,7 @@ app.get('/api/status/:external_id', (req, res) => {
   res.json({ status: pedido.status, transaction_id: pedido.transaction_id });
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, servico: 'arena-do-hexa-pix', provedor: 'veopag' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, servico: 'arena-do-hexa-pix', provedor: 'veopag', smtp: !!mailer, smtp_host: mailer ? SMTP_HOST : null, email_from: mailer ? SMTP_FROM : null }));
 
 app.listen(PORT, () => {
   console.log(`\n🟢 Backend Arena do Hexa (VeoPag) na porta ${PORT}`);
