@@ -63,6 +63,10 @@ const SMTP_USER = env.SMTP_USER || '';
 const SMTP_PASS = env.SMTP_PASS || '';
 const SMTP_FROM = env.SMTP_FROM || (SMTP_USER ? `Arena do Hexa <${SMTP_USER}>` : '');
 const LOJA_NOME = env.LOJA_NOME || 'Arena do Hexa';
+const BREVO_API_KEY = env.BREVO_API_KEY || '';
+// Extrai e-mail e nome do remetente a partir de SMTP_FROM ("Nome <email>")
+const FROM_EMAIL = (String(SMTP_FROM).match(/<([^>]+)>/) || [null, SMTP_USER || 'noreply@arenadohexa.com.br'])[1].trim();
+const FROM_NAME  = (String(SMTP_FROM).split('<')[0].trim()) || LOJA_NOME;
 
 let mailer = null;
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
@@ -80,68 +84,107 @@ if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   console.warn('✉️  SMTP não configurado — e-mails de confirmação desativados (defina SMTP_* no .env).');
 }
 
-async function enviarEmailConfirmacao(pedido) {
-  if (!mailer || !pedido || !pedido.email) return;
+if (BREVO_API_KEY) console.log('✉️  Brevo (API HTTPS) ativo — método de envio preferencial.');
+
+const metodoEmail = () => BREVO_API_KEY ? 'brevo' : (mailer ? 'smtp' : 'none');
+
+/* Enviador unificado: tenta Brevo (HTTPS, não é bloqueado) e cai para SMTP. */
+async function enviarEmail({ to, subject, html }) {
+  if (!to) return { ok: false, erro: 'sem destinatario' };
+  // 1) Brevo via HTTPS
+  if (BREVO_API_KEY) {
+    try {
+      const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: { 'api-key': BREVO_API_KEY, 'content-type': 'application/json', 'accept': 'application/json' },
+        body: JSON.stringify({
+          sender: { email: FROM_EMAIL, name: FROM_NAME },
+          to: [{ email: to }],
+          subject, htmlContent: html,
+        }),
+      });
+      const body = await r.text();
+      if (!r.ok) { console.error('Brevo falhou:', r.status, body); return { ok: false, etapa: 'brevo', status: r.status, erro: body }; }
+      console.log('✉️  E-mail enviado via Brevo para', to);
+      return { ok: true, metodo: 'brevo' };
+    } catch (e) {
+      console.error('Erro Brevo:', e.message);
+      return { ok: false, etapa: 'brevo', erro: String(e && e.message || e) };
+    }
+  }
+  // 2) Fallback SMTP
+  if (mailer) {
+    try {
+      await mailer.sendMail({ from: SMTP_FROM, to, subject, html });
+      console.log('✉️  E-mail enviado via SMTP para', to);
+      return { ok: true, metodo: 'smtp' };
+    } catch (e) {
+      console.error('Erro SMTP:', e.message);
+      return { ok: false, etapa: 'smtp', erro: String(e && e.message || e), code: e && e.code };
+    }
+  }
+  console.warn('Nenhum método de e-mail configurado.');
+  return { ok: false, erro: 'sem metodo' };
+}
+
+/* Templates de e-mail */
+function tplPedidoRecebido(pedido) {
   const valor = (pedido.amount != null ? pedido.amount : 0).toFixed(2).replace('.', ',');
   const nome = (pedido.nome || 'torcedor(a)').split(' ')[0];
-  try {
-    await mailer.sendMail({
-      from: SMTP_FROM,
-      to: pedido.email,
-      subject: `✅ Pagamento confirmado — ${LOJA_NOME}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
-          <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
-            <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
-            <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
-          </div>
-          <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
-            <h2 style="margin:0 0 8px">Pagamento confirmado! 🎉</h2>
-            <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Recebemos o seu pagamento e seu pedido já entrou em separação.</p>
-            <table style="width:100%;border-collapse:collapse;font-size:14px">
-              <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
-              <tr><td style="padding:8px 0;color:#5C6660">Valor pago</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
-            </table>
-            <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Em breve você receberá o código de rastreio. Obrigado por torcer com a gente! 🇧🇷</p>
-          </div>
-        </div>`,
-    });
-    console.log('✉️  E-mail de confirmação enviado para', pedido.email);
-  } catch (e) {
-    console.error('Falha ao enviar e-mail:', e.message);
-  }
+  return {
+    subject: `🛍️ Recebemos seu pedido — ${LOJA_NOME}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
+        <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
+          <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
+          <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
+        </div>
+        <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
+          <h2 style="margin:0 0 8px">Recebemos seu pedido! 👟</h2>
+          <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Seu pedido foi registrado e estamos <b>aguardando a confirmação do pagamento via PIX</b>. Assim que o pagamento cair, você recebe outro e-mail de confirmação.</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
+            <tr><td style="padding:8px 0;color:#5C6660">Valor</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
+          </table>
+          <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Se ainda não pagou, é só abrir o PIX e finalizar. O código expira conforme o tempo do QR Code. 🇧🇷</p>
+        </div>
+      </div>`,
+  };
+}
+function tplPagamentoConfirmado(pedido) {
+  const valor = (pedido.amount != null ? pedido.amount : 0).toFixed(2).replace('.', ',');
+  const nome = (pedido.nome || 'torcedor(a)').split(' ')[0];
+  return {
+    subject: `✅ Pagamento confirmado — ${LOJA_NOME}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
+        <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
+          <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
+          <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
+        </div>
+        <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
+          <h2 style="margin:0 0 8px">Pagamento confirmado! 🎉</h2>
+          <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Recebemos o seu pagamento e seu pedido já entrou em separação.</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
+            <tr><td style="padding:8px 0;color:#5C6660">Valor pago</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
+          </table>
+          <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Em breve você receberá o código de rastreio. Obrigado por torcer com a gente! 🇧🇷</p>
+        </div>
+      </div>`,
+  };
+}
+
+async function enviarEmailConfirmacao(pedido) {
+  if (!pedido || !pedido.email) return;
+  const { subject, html } = tplPagamentoConfirmado(pedido);
+  await enviarEmail({ to: pedido.email, subject, html });
 }
 
 async function enviarEmailPedidoRecebido(pedido) {
-  if (!mailer || !pedido || !pedido.email) return;
-  const valor = (pedido.amount != null ? pedido.amount : 0).toFixed(2).replace('.', ',');
-  const nome = (pedido.nome || 'torcedor(a)').split(' ')[0];
-  try {
-    await mailer.sendMail({
-      from: SMTP_FROM,
-      to: pedido.email,
-      subject: `🛍️ Recebemos seu pedido — ${LOJA_NOME}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#0B1410">
-          <div style="background:#053D22;padding:22px;border-radius:14px 14px 0 0;text-align:center">
-            <span style="display:inline-block;background:#FFD500;color:#053D22;font-weight:900;font-size:20px;padding:8px 13px;border-radius:9px">H</span>
-            <div style="color:#fff;font-weight:800;letter-spacing:.04em;margin-top:10px">${LOJA_NOME.toUpperCase()}</div>
-          </div>
-          <div style="border:1px solid #e6e8e2;border-top:none;border-radius:0 0 14px 14px;padding:26px">
-            <h2 style="margin:0 0 8px">Recebemos seu pedido! 👟</h2>
-            <p style="color:#5C6660;margin:0 0 16px">Olá, ${nome}! Seu pedido foi registrado e estamos <b>aguardando a confirmação do pagamento via PIX</b>. Assim que o pagamento cair, você recebe outro e-mail de confirmação.</p>
-            <table style="width:100%;border-collapse:collapse;font-size:14px">
-              <tr><td style="padding:8px 0;color:#5C6660">Pedido</td><td style="padding:8px 0;text-align:right;font-weight:700">${pedido.orderId || ''}</td></tr>
-              <tr><td style="padding:8px 0;color:#5C6660">Valor</td><td style="padding:8px 0;text-align:right;font-weight:700">R$ ${valor}</td></tr>
-            </table>
-            <p style="color:#5C6660;font-size:13px;margin:18px 0 0">Se ainda não pagou, é só abrir o PIX e finalizar. O código expira conforme o tempo do QR Code. 🇧🇷</p>
-          </div>
-        </div>`,
-    });
-    console.log('✉️  E-mail de pedido recebido enviado para', pedido.email);
-  } catch (e) {
-    console.error('Falha ao enviar e-mail (pedido recebido):', e.message);
-  }
+  if (!pedido || !pedido.email) return;
+  const { subject, html } = tplPedidoRecebido(pedido);
+  await enviarEmail({ to: pedido.email, subject, html });
 }
 
 /* ============================================================
@@ -348,29 +391,20 @@ app.get('/api/status/:external_id', (req, res) => {
   res.json({ status: pedido.status, transaction_id: pedido.transaction_id });
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, servico: 'arena-do-hexa-pix', provedor: 'veopag', smtp: !!mailer, smtp_host: mailer ? SMTP_HOST : null, email_from: mailer ? SMTP_FROM : null }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, servico: 'arena-do-hexa-pix', provedor: 'veopag', email_method: metodoEmail(), smtp: !!mailer, brevo: !!BREVO_API_KEY, email_from: `${FROM_NAME} <${FROM_EMAIL}>` }));
 
-/* Diagnóstico de e-mail: verifica login SMTP e tenta enviar um teste
-   só para o próprio SMTP_USER. Retorna o erro exato se falhar. */
+/* Diagnóstico de e-mail: envia um teste só para o próprio remetente
+   e retorna o resultado/erro exato (Brevo ou SMTP). */
 app.get('/api/test-email', async (_req, res) => {
-  if (!mailer) return res.json({ ok: false, etapa: 'config', erro: 'SMTP não configurado (faltam variáveis SMTP_*).' });
-  const resultado = { host: SMTP_HOST, port: SMTP_PORT, user: SMTP_USER, secure: SMTP_PORT === 465 };
-  try {
-    await mailer.verify();
-    resultado.login = 'OK';
-  } catch (e) {
-    return res.json({ ok: false, etapa: 'login', erro: String(e && e.message || e), code: e && e.code, command: e && e.command, ...resultado });
-  }
-  try {
-    const info = await mailer.sendMail({
-      from: SMTP_FROM, to: SMTP_USER,
-      subject: '✅ Teste de e-mail — Arena do Hexa',
-      text: 'Se você recebeu este e-mail, o envio automático está funcionando!',
-    });
-    return res.json({ ok: true, login: 'OK', enviado: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, ...resultado });
-  } catch (e) {
-    return res.json({ ok: false, etapa: 'envio', login: 'OK', erro: String(e && e.message || e), code: e && e.code, command: e && e.command, ...resultado });
-  }
+  const metodo = metodoEmail();
+  if (metodo === 'none') return res.json({ ok: false, etapa: 'config', erro: 'Nenhum método de e-mail configurado (defina BREVO_API_KEY ou SMTP_*).' });
+  const destino = FROM_EMAIL;
+  const r = await enviarEmail({
+    to: destino,
+    subject: '✅ Teste de e-mail — Arena do Hexa',
+    html: '<p>Se você recebeu este e-mail, o envio automático está <b>funcionando</b>! 🎉</p>',
+  });
+  return res.json({ metodo, destino, from: `${FROM_NAME} <${FROM_EMAIL}>`, ...r });
 });
 
 app.listen(PORT, () => {
