@@ -71,6 +71,9 @@ if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
     port: SMTP_PORT,
     secure: SMTP_PORT === 465, // 465 = SSL; 587 = STARTTLS
     auth: { user: SMTP_USER, pass: SMTP_PASS },
+    connectionTimeout: 6000, // falha rápido se a porta estiver bloqueada
+    greetingTimeout: 6000,
+    socketTimeout: 6000,
   });
   console.log('✉️  SMTP configurado:', SMTP_HOST);
 } else {
